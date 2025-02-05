@@ -63,7 +63,7 @@
 function transform_code(code) {
     const ast = parse(code, { sourceType: "module" });
 
-    const debug = false
+    let debug = false
 
     function handlePath(path) {
         function alloc() {
@@ -90,13 +90,10 @@ function transform_code(code) {
                 },
                 merge_1and2() {
                     for (let i = 0; i < this.arr1.length; i++) {
-                        let intersect = Math.min(this.arr1[i], this.arr2[i])
-                        if (intersect & 0x80000000) {
-                            intersect = Math.max(this.arr1[i], this.arr2[i])
-                        }
-                        this.num += intersect
-                        this.arr1[i]-=intersect
-                        this.arr2[i]-=intersect
+                        let normalize = this.arr2[i]
+                        this.num += normalize
+                        this.arr1[i]-=normalize
+                        this.arr2[i]-=normalize
                     }
                     return this
                 },
