@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>bitwise-simplifier.js</title>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<script>
+    function create_textarea(label_text) {
+        const label = document.createElement("label")
+        label.textContent = label_text
+        const textarea = document.createElement("textarea")
+        textarea.setAttribute("cols",50)
+        textarea.setAttribute("rows",15)
+        textarea.style.display = "block"
+        label.append(textarea)
+        return [label,textarea]
+    }
+    function horizontal_div(...children) {
+        const div = document.createElement("div")
+        div.style.display = "flex"
+        div.append(...children)
+        return div
+    }
+    const [input_label, input_textarea] = create_textarea("Input")
+    const [output_label, output_textarea] = create_textarea("Output")
+
+    function p(p_text,a_text) {
+        const p_element = document.createElement("p")
+        p_element.textContent = p_text
+        if (a_text) {
+            const a = document.createElement("a")
+            a.textContent = a_text
+            a.setAttribute("href",a_text)
+            p_element.append(a)
+        }
+        return p_element
+    }
+
+    input_textarea.addEventListener("paste",createHandlePaste(output_textarea))
+
+    document.body.append(p("Bitwise Simplifier:"))
+    document.body.append(horizontal_div(input_label,output_label))
+    document.body.append(p("bug report: ","https://github.com/FuPeiJiang/bitwise-simplifier.js/issues"))
+    document.body.append(p("only pasting is supported, incremental typing is not supported"))
+    document.body.append(p("only single variable is supported, e.g. x & y is not supported"))
+    document.body.append(p("Example: (x & 0xFF) + (x & 0xFF00)"))
+
+    const parse = Babel.packages.parser.parse
+    const traverse = Babel.packages.traverse
+    const generator = Babel.packages.generator
+
+    function createHandlePaste(dest_textarea) {
+        return function handlePaste(e) {
+            setTimeout(() => {
+                dest_textarea.value = transform_code(e.target.value)
+            }, 1);
+        }
+    }
+
+function transform_code(code) {
+    const ast = parse(code, { sourceType: "module" });
+
+    const debug = false
+
+    traverse.default(ast, {
+
+        BinaryExpression(path) {
+            function alloc() {
+                return {
+                    arr1: Array(32).fill(0),
+                    arr2: Array(32).fill(0),
+                    num: 0,
+                    // isConst: true,
+                    canApplyBitwise() {
+                        let orThis = this.num
+                        for (const arr of [this.arr1, this.arr2]) {
+                            for (const v of arr) {
+                                if (orThis & v) return false
+                                orThis |= v
+                            }
+                        }
+                        return true
+                    },
+                    isConst() {
+                        for (let i = 0; i < this.arr1.length; i++) {
+                            if (this.arr1[i] !== this.arr2[i]) return false
+                        }
+                        return true
+                    },
+                    merge_1and2() {
+                        for (let i = 0; i < this.arr1.length; i++) {
+                            const intersect = Math.min(this.arr1[i], this.arr2[i])
+                            this.num += intersect
+                            this.arr1[i]-=intersect
+                            this.arr2[i]-=intersect
+                        }
+                        return this
+                    },
+                    calc(X) {
+                        let retVal = 0
+                        retVal+=this.num
+                        for (let i = 0; i < this.arr1.length; i++) {
+                            if (X & (1 << i)) {
+                                retVal+=this.arr1[i]
+                            } else {
+                                retVal+=this.arr2[i]
+                            }
+                        }
+                        return retVal
+                    },
+                }
+            }
+            const identifiers = new Set()
+
+            function get(node) {
+                switch (node.type) {
+                    case "BinaryExpression":
+                        const left = get(node.left)
+                        if (!left) return false
+                        const right = get(node.right)
+                        if (!right) return false
+                        switch (node.operator) {
+                            case "^":
+                                let operateOn, flip_mask
+                                if (left.isConst()) {
+                                    flip_mask=left; operateOn=right
+                                } else if (right.isConst()) {
+                                    flip_mask=right; operateOn=left
+                                } else {
+                                    if (debug) debugger; return false
+                                }
+
+                                if (!operateOn.canApplyBitwise()) {
+                                    if (debug) debugger; return false
+                                }
+                                for (let i = 0; i < operateOn.arr1.length; i++) {
+                                    const temp = operateOn.arr1[i]
+                                    operateOn.arr1[i] = (temp & ~flip_mask.num) | (operateOn.arr2[i] & flip_mask.num)
+                                    operateOn.arr2[i] = (operateOn.arr2[i] & ~flip_mask.num) | (temp & flip_mask.num)
+                                }
+
+                                let orThis = 0
+                                for (const arr of [operateOn.arr1, operateOn.arr2]) {
+                                    for (const v of arr) {
+                                        orThis |= v
+                                    }
+                                }
+
+                                operateOn.num ^= (~orThis & flip_mask.num)
+                                return operateOn
+                            case "&":{
+                                let operateOn, and_mask
+                                if (left.isConst()) {
+                                    and_mask=left; operateOn=right
+                                } else if (right.isConst()) {
+                                    and_mask=right; operateOn=left
+                                } else {
+                                    if (debug) debugger; return false
+                                }
+                                if (!operateOn.canApplyBitwise()) {
+                                    if (debug) debugger; return false
+                                }
+                                for (const arr of [operateOn.arr1, operateOn.arr2]) {
+                                    for (let i = 0; i < arr.length; i++) {
+                                        arr[i] &= and_mask.num
+                                    }
+                                }
+                                operateOn.num &= and_mask.num
+
+                                return operateOn
+                            }
+                            case "+":
+                                for (const [arrLeft, arrRight] of [[left.arr1, right.arr1], [left.arr2, right.arr2]]) {
+                                    for (let i = 0; i < arrLeft.length; i++) {
+                                        arrLeft[i] += arrRight[i]
+                                    }
+                                }
+                                left.num += right.num
+                                return left
+                            case "-":
+                                for (const [arrLeft, arrRight] of [[left.arr1, right.arr1], [left.arr2, right.arr2]]) {
+                                    for (let i = 0; i < arrLeft.length; i++) {
+                                        arrLeft[i] -= arrRight[i]
+                                    }
+                                }
+                                left.num -= right.num
+                                return left
+                            case "*":{
+                                let operateOn, multiply
+                                if (left.isConst()) {
+                                    multiply=left; operateOn=right
+                                } else if (right.isConst()) {
+                                    multiply=right; operateOn=left
+                                } else {
+                                    if (debug) debugger; return false
+                                }
+
+                                for (const arrOperateOn of [operateOn.arr1, operateOn.arr2]) {
+                                    for (let i = 0; i < arrOperateOn.length; i++) {
+                                        arrOperateOn[i] *= multiply.num
+                                    }
+                                }
+
+                                operateOn.num *= multiply.num
+                                return operateOn
+                            }
+                            case "|":{
+                                let operateOn, or_mask
+                                if (left.isConst()) {
+                                    or_mask=left; operateOn=right
+                                } else if (right.isConst()) {
+                                    or_mask=right; operateOn=left
+                                } else {
+                                    if (debug) debugger; return false
+                                }
+                                if (!operateOn.canApplyBitwise()) {
+                                    if (debug) debugger; return false
+                                }
+                                for (const arr of [operateOn.arr1, operateOn.arr2]) {
+                                    for (let i = 0; i < arr.length; i++) {
+                                        arr[i] &= ~or_mask.num
+                                    }
+                                }
+                                operateOn.num |= or_mask.num
+
+                                return operateOn
+                            }
+                            default: if (debug) debugger; return false
+                        }
+                    case "UnaryExpression":
+                        const argument = get(node.argument)
+                        if (!argument) return false
+                        switch (node.operator) {
+                            case "~":
+                                if (!argument.canApplyBitwise()) {
+                                    if (debug) debugger; return false
+                                }
+
+                                [argument.arr1, argument.arr2] = [argument.arr2, argument.arr1]
+
+                                let orThis = 0
+                                for (const arr of [argument.arr1, argument.arr2]) {
+                                    for (const v of arr) {
+                                        orThis |= v
+                                    }
+                                }
+
+                                argument.num ^= ~orThis
+                                break
+                            case "-":{
+                                if (!argument.canApplyBitwise()) {
+                                    if (debug) debugger; return false
+                                }
+
+                                [argument.arr1, argument.arr2] = [argument.arr2, argument.arr1]
+
+                                let orThis = 0
+                                for (const arr of [argument.arr1, argument.arr2]) {
+                                    for (const v of arr) {
+                                        orThis |= v
+                                    }
+                                }
+
+                                argument.num ^= ~orThis
+
+                                argument.num += 1
+                                break
+                            }
+                            default: if (debug) debugger; return false
+                        }
+                        return argument
+                    case "Identifier":
+                        const identifier = alloc()
+                        identifiers.add(node.name)
+                        if (identifiers.size > 1) return false
+                        for (let i = 0; i < identifier.arr1.length; i++) {
+                            identifier.arr1[i] |= (1 << i)
+                        }
+                        return identifier
+                    case "NumericLiteral":
+                        const num_constant = alloc()
+                        num_constant.num = node.value
+                        return num_constant
+                    default: if (debug) debugger; return false
+                }
+            }
+            const got = get(path.node)
+            if (!got) {
+                return
+            }
+            if (identifiers.size !== 1) {
+                return
+            }
+            const merged = got.merge_1and2()
+            if (merged.num) {
+                return
+            }
+            for (const x of merged.arr2) {
+                if (x) {
+                    return
+                }
+            }
+            let or_mask = 0
+            for (let i = 0; i < merged.arr1.length; i++) {
+                if (merged.arr1[i] === (1 << i)) {
+                    or_mask|=(1 << i)
+                } else if (merged.arr1[i] !== 0) {
+                    return
+                }
+            }
+            if (or_mask === -1) {
+                console.log(`replaced ${path.toString()} with ${Array.from(identifiers)[0]}`)
+                path.replaceWith({
+                    type: "Identifier",
+                    name: Array.from(identifiers)[0],
+                });
+            } else {
+                const replaceObj = {
+                    type: "BinaryExpression",
+                    operator: "&",
+                    left: {
+                        type: "Identifier",
+                        name: Array.from(identifiers)[0],
+                    },
+                    right: {
+                        type: "NumericLiteral",
+                        extra: {
+                            raw: `0x${or_mask.toString(16).toUpperCase()}`,
+                            rawValue: or_mask,
+                        },
+                        value: or_mask
+                    },
+                }
+                const replaceWith = generator.default(replaceObj).code
+                const replaceWhat = path.toString()
+                if (replaceWhat === replaceWith) return
+                if (replaceWith.length < replaceWhat.length) {
+                    console.log(`replaced ${replaceWhat} with ${replaceWith}`)
+                }
+                path.replaceWith(replaceObj);
+            }
+        }
+    });
+
+    const { code: newCode } = generator.default(ast);
+    return newCode
+}
+
+</script>
+</body>
+</html>
